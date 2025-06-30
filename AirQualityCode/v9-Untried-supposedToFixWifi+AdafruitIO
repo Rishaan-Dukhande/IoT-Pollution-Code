@@ -1,0 +1,149 @@
+//Untried sketch - might help make wifi+adafruit io more stable
+#define USE_AIRLIFT
+#include <AdafruitIO_WiFi.h>
+#include <Adafruit_BME280.h>
+#include <Adafruit_PM25AQI.h>
+#include <WiFiNINA.h>      // Adafruit fork
+#include <SPI.h>
+#include <Wire.h>
+
+/* -------- credentials -------- */
+#define IO_USERNAME "-"
+#define IO_KEY      "-"
+#define WIFI_SSID   "J6-supercoolwifi"
+#define WIFI_PASS   "penguins"
+
+/* -------- location (for map feed) -------- */
+const double AIO_LATITUDE  = 37.3142184;
+const double AIO_LONGITUDE = -121.9686453;
+const double AIO_ELEVATION = 45.0;
+
+/* -------- AirLift pins -------- */
+#define ESP32_CS_PIN    13
+#define ESP32_READY_PIN 11
+#define ESP32_RESET_PIN 12
+#define SPIWIFI         SPI
+
+/* 9-arg constructor (AirLift requires pins) */
+AdafruitIO_WiFi io(IO_USERNAME, IO_KEY, WIFI_SSID, WIFI_PASS,
+                   ESP32_CS_PIN, ESP32_READY_PIN, ESP32_RESET_PIN, -1, &SPIWIFI);
+
+/* feeds */
+AdafruitIO_Feed *feed_aqi, *feed_aqi_category, *feed_temperature, *feed_humidity;
+
+/* sensors */
+Adafruit_BME280  bme;
+Adafruit_PM25AQI pm25;
+
+/* timing */
+unsigned long lastPublish = 0;
+const unsigned long PUBLISH_MS = 2UL * 60UL * 1000UL;
+
+/* helper — 3-try feed save */
+template <typename T>
+bool saveRetry(AdafruitIO_Feed *f, T v) {
+  for (int i = 0; i < 3; i++) {
+    if (f && f->save(v)) return true;
+    Serial.println("  ↻ retry feed save…");
+    delay(500);
+  }
+  return false;
+}
+
+/* ---------- Wi-Fi + IO connect ---------- */
+void connectWiFi() {
+  WiFi.setPins(ESP32_CS_PIN, ESP32_READY_PIN, ESP32_RESET_PIN, -1, &SPIWIFI);
+  Serial.print("Connecting to WiFi ");
+  Serial.println(WIFI_SSID);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  unsigned long t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
+    delay(500); Serial.print(".");
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("\n✅ WiFi IP: "); Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\n❌ WiFi failed");
+  }
+}
+
+void connectIO() {
+  Serial.print("Connecting to Adafruit IO");
+  io.connect();
+  unsigned long t0 = millis();
+  while (io.status() < AIO_CONNECTED && millis() - t0 < 15000) {
+    io.run(); delay(300); Serial.print(".");
+  }
+  Serial.println(io.status() == AIO_CONNECTED ? "\n✅ IO connected" : "\n❌ IO failed");
+}
+
+/* ---------- setup ---------- */
+void setup() {
+  Serial.begin(115200); delay(1000);
+
+  connectWiFi();
+  connectIO();
+
+  feed_aqi          = io.feed("air-quality-sensor.aqi");
+  feed_aqi_category = io.feed("air-quality-sensor.category");
+  feed_temperature  = io.feed("air-quality-sensor.temperature");
+  feed_humidity     = io.feed("air-quality-sensor.humidity");
+
+  if (!bme.begin(0x76) && !bme.begin(0x77)) {
+    Serial.println("❌ BME280 not found!"); while (1);
+  }
+  Serial.println("✅ BME280 OK");
+
+  Serial1.begin(9600);
+  if (!pm25.begin_UART(&Serial1)) {
+    Serial.println("❌ PM2.5 sensor not found!"); while (1);
+  }
+  Serial.println("✅ PM2.5 sensor OK");
+  delay(2000);
+}
+
+/* ---------- AQI helper ---------- */
+int calcAQI(float pm, String& cat) {
+  if (pm <= 12.0)         { cat="Good";                          return map(pm, 0,12,0,50);}
+  if (pm <= 35.4)         { cat="Moderate";                      return map(pm,12,35,51,100);}
+  if (pm <= 55.4)         { cat="Unhealthy for Sensitive";       return map(pm,36,55,101,150);}
+  if (pm <= 150.4)        { cat="Unhealthy";                     return map(pm,56,150,151,200);}
+  if (pm <= 250.4)        { cat="Very Unhealthy";                return map(pm,151,250,201,300);}
+                           cat="Hazardous";                      return map(pm,251,500,301,500);
+}
+
+/* ---------- loop ---------- */
+void loop() {
+  io.run();
+
+  /* auto-reconnect Wi-Fi */
+  if (WiFi.status() != WL_CONNECTED) { Serial.println("WiFi dropped → reconnect"); connectWiFi(); }
+  /* auto-reconnect IO */
+  if (io.status() != AIO_CONNECTED)  { Serial.println("IO dropped → reconnect");  connectIO();  }
+
+  if (millis() - lastPublish < PUBLISH_MS) return;
+  lastPublish = millis();
+
+  /* read PM2.5 once */
+  PM25_AQI_Data data;
+  if (!pm25.read(&data)) { Serial.println("❌ PM2.5 read error"); return; }
+
+  float pmVal  = data.pm25_env;
+  String aqiCat;
+  int   aqi    = calcAQI(pmVal, aqiCat);
+  float tempF  = bme.readTemperature()*1.8+32;
+  float rh     = bme.readHumidity();
+
+  Serial.print("AQI "); Serial.print(aqi); Serial.print(" ("); Serial.print(aqiCat);
+  Serial.print(")  Temp "); Serial.print(tempF,1); Serial.print(" F  RH ");
+  Serial.print(rh,1); Serial.println(" %");
+
+  saveRetry(feed_aqi,          aqi);
+  delay(500);
+  saveRetry(feed_aqi_category, aqiCat.c_str());
+  delay(500);
+  saveRetry(feed_temperature,  tempF);
+  delay(500);
+  saveRetry(feed_humidity,     rh);
+  delay(500);
+}
