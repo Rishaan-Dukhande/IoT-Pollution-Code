@@ -9,7 +9,7 @@
 #include <Wire.h>
 
 #define IO_USERNAME    ""
-#define IO_KEY         "aio_aaaaaaaaa"
+#define IO_KEY         ""
 #define WIFI_SSID      "J6-supercoolwifi"
 #define WIFI_PASS      "penguins"
 
