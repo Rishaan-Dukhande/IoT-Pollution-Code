@@ -237,12 +237,12 @@ void loop() {
       analogWrite(greenPin, 255);
       analogWrite(bluePin, 0);
     } else if (aqi_cat == "Moderate") {
-      analogWrite(redPin, 183);
-      analogWrite(greenPin, 200);
+      analogWrite(redPin, 180);
+      analogWrite(greenPin, 180);
       analogWrite(bluePin, 0);
     } else if (aqi_cat == "Unhealthy for Sensitive Groups") {
       analogWrite(redPin, 183);
-      analogWrite(greenPin, 100);
+      analogWrite(greenPin, 200);
       analogWrite(bluePin, 0);
     } else if (aqi_cat == "Unhealthy") {
       analogWrite(redPin, 183);
