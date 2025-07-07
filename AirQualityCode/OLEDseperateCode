@@ -17,9 +17,35 @@ void setup{
 
   //0x3C is an I2C address for the Adafruit OLED screen
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-  Serial.println(F(OLED connection failed));
+  Serial.println(F("OLED connection failed"));
   while(true); //stops and loops until OLED screen connects
   }
 
-  display.clearDisplay(); //clears display screen
+  display.clearDisplay();
+  display.setTextSize(1);    // 6×8-pixel font
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println(F("OLED Ready"));
+  display.display();
+  delay(1000);               // Splash for 1 s
+  display.clearDisplay(); //clears display
+}
+
+void loop{
+  display.clearDisplay();
+
+  display.setTextSize(2);
+  display.setCursor(27,0);
+  display.print(F("AQI: "));
+  display.println(aqi);
+
+  display.setTextSize(1);
+  display.setCursor(0,20);
+  display.print(F("Temp: "));
+  display.println(temp);
+
+  display.print(F("Humidity: "));
+  display.print(humid);
+
+  display.display();
 }
