@@ -1,0 +1,221 @@
+#include <WiFi.h>
+#include <Adafruit_MQTT.h>
+#include <Adafruit_MQTT_Client.h>
+#include <Adafruit_BME280.h>
+#include <Adafruit_PM25AQI.h>
+#include <Wire.h>
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SH110X.h>
+
+// ------- WiFi & Adafruit IO Credentials ------
+#define WIFI_SSID     "-"
+#define WIFI_PASS     "-"
+#define AIO_SERVER    "io.adafruit.com"
+#define AIO_SERVERPORT 1883
+#define AIO_USERNAME  "-"
+#define AIO_KEY       "-"
+
+// ------- MQTT Setup -------
+WiFiClient client;
+Adafruit_MQTT_Client mqtt(&client, AIO_SERVER, AIO_SERVERPORT, AIO_USERNAME, AIO_KEY);
+
+Adafruit_MQTT_Publish feed_aqi      = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/air-quality-sensor.aqi");
+Adafruit_MQTT_Publish feed_temp     = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/air-quality-sensor.temperature");
+Adafruit_MQTT_Publish feed_humidity = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/air-quality-sensor.humidity");
+Adafruit_MQTT_Publish feed_category = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/air-quality-sensor.category");
+
+// ------- Sensors & Display -------
+Adafruit_BME280 bme;         // I2C
+Adafruit_PM25AQI pm25;       // UART
+Adafruit_SH1107 display(64, 128, &Wire);
+
+bool bmeFound = false;
+bool pm25Found = false;
+bool oledFound = true;
+
+int redPin = 25;   // safe pins for ESP32 RGB LED
+int greenPin = 26;
+int bluePin = 27;
+
+unsigned long lastPublish = 0;
+const unsigned long publishInterval = 120000;  // 2 minutes
+
+// ---------- Functions ----------
+void connectWiFi() {
+  Serial.print("Connecting to WiFi...");
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println(" ✅ WiFi connected");
+}
+
+void connectMQTT() {
+  Serial.print("Connecting to Adafruit IO MQTT...");
+  while (mqtt.connect() != 0) {
+    Serial.println("Retrying MQTT connection in 5 seconds...");
+    delay(5000);
+  }
+  Serial.println(" ✅ MQTT connected");
+}
+
+int calculate_aqi(float pm25_val, String &category) {
+  int aqi;
+  if (pm25_val <= 12.0) {
+    aqi = map(pm25_val, 0, 12, 0, 50);
+    category = "Good";
+  } else if (pm25_val <= 35.4) {
+    aqi = map(pm25_val, 12, 35, 51, 100);
+    category = "Moderate";
+  } else if (pm25_val <= 55.4) {
+    aqi = map(pm25_val, 36, 55, 101, 150);
+    category = "Unhealthy for Sensitive Groups";
+  } else if (pm25_val <= 150.4) {
+    aqi = map(pm25_val, 56, 150, 151, 200);
+    category = "Unhealthy";
+  } else if (pm25_val <= 250.4) {
+    aqi = map(pm25_val, 151, 250, 201, 300);
+    category = "Very Unhealthy";
+  } else {
+    aqi = map(pm25_val, 251, 500, 301, 500);
+    category = "Hazardous";
+  }
+  return aqi;
+}
+
+void updateLED(String category) {
+  if (category == "Good") {
+    analogWrite(redPin, 0); analogWrite(greenPin, 255); analogWrite(bluePin, 0);
+  } else if (category == "Moderate") {
+    analogWrite(redPin, 183); analogWrite(greenPin, 255); analogWrite(bluePin, 0);
+  } else if (category == "Unhealthy for Sensitive Groups") {
+    analogWrite(redPin, 183); analogWrite(greenPin, 200); analogWrite(bluePin, 0);
+  } else if (category == "Unhealthy") {
+    analogWrite(redPin, 183); analogWrite(greenPin, 0); analogWrite(bluePin, 0);
+  } else if (category == "Very Unhealthy") {
+    analogWrite(redPin, 183); analogWrite(greenPin, 0); analogWrite(bluePin, 200);
+  } else if (category == "Hazardous") {
+    analogWrite(redPin, 91); analogWrite(greenPin, 0); analogWrite(bluePin, 0);
+  }
+}
+
+void updateOLED(int aqi, float temp, float humid) {
+  if (!oledFound) return;
+
+  display.clearDisplay();
+  display.setTextSize(2);  // Bigger for AQI
+  display.setCursor(0, 0);
+  display.print("AQI: ");
+  display.println(aqi);
+
+  display.setTextSize(1);  // Smaller for others
+  display.setCursor(0, 30);
+  display.print("Temp: ");
+  display.print(temp, 1);
+  display.println(" F");
+
+  display.setCursor(0, 45);
+  display.print("Hum:  ");
+  display.print(humid, 1);
+  display.println("%");
+
+  display.display();
+}
+
+// ---------- Setup ----------
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  Wire.begin(21, 22);
+  delay(500);
+
+  connectWiFi();
+  connectMQTT();
+
+  // --- Initialize BME280 ---
+  if (!bme.begin(0x76) && !bme.begin(0x77)) {
+    Serial.println("⚠️ Could not find a valid BME280 sensor!");
+  } else {
+    bmeFound = true;
+    Serial.println("✅ BME280 sensor initialized");
+  }
+
+  // --- Initialize PM2.5 sensor ---
+  Serial2.begin(9600, SERIAL_8N1, 16, 17);  // RX2 = GPIO16, TX2 = GPIO17
+  if (!pm25.begin_UART(&Serial2)) {
+    Serial.println("⚠️ PM2.5 sensor not found!");
+  } else {
+    pm25Found = true;
+    Serial.println("✅ PM2.5 sensor initialized");
+  }
+
+  // --- Initialize OLED ---
+  if (!display.begin(0x3C, true)) {
+    Serial.println("⚠️ OLED not found at 0x3C");
+    while (1) delay(10);
+  }
+  Serial.println("✅ OLED initialized!");
+  display.clearDisplay();
+  display.setRotation(1);
+  display.setTextSize(1);
+  display.setTextColor(SH110X_WHITE);
+  display.setCursor(0, 0);
+  display.println("Hello, OLED!");
+  display.println("Test Passed!");
+  display.display();
+
+  // --- RGB LED Pins ---
+  pinMode(redPin, OUTPUT);
+  pinMode(greenPin, OUTPUT);
+  pinMode(bluePin, OUTPUT);
+}
+
+// ---------- Loop ----------
+void loop() {
+  mqtt.processPackets(10);
+  mqtt.ping();
+
+  unsigned long now = millis();
+  if (now - lastPublish >= publishInterval) {
+    lastPublish = now;
+
+    float temp = bmeFound ? (bme.readTemperature() * 1.8 + 32) : 0;
+    float humid = bmeFound ? bme.readHumidity() : 0;
+
+    float pm25Value = 0;
+    if (pm25Found) {
+      PM25_AQI_Data data;
+      if (pm25.read(&data)) {
+        pm25Value = data.pm25_env;
+      } else {
+        Serial.println("PM2.5 read error");
+      }
+    }
+
+    String category;
+    int aqi = calculate_aqi(pm25Value, category);
+
+    Serial.printf("AQI: %d | Temp: %.2f F | Humidity: %.2f %% | Category: %s\n",
+                  aqi, temp, humid, category.c_str());
+
+    // --- Publish to Adafruit IO ---
+    char buf[10];
+    sprintf(buf, "%d", aqi);
+    feed_aqi.publish(buf);
+
+    dtostrf(temp, 4, 2, buf);
+    feed_temp.publish(buf);
+
+    dtostrf(humid, 4, 2, buf);
+    feed_humidity.publish(buf);
+
+    feed_category.publish(category.c_str());
+
+    // --- Update Outputs ---
+    updateOLED(aqi, temp, humid);
+    updateLED(category);
+  }
+}
