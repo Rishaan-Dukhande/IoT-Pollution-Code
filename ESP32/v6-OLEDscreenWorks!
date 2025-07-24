@@ -1,0 +1,144 @@
+#include <WiFi.h>
+#include <Adafruit_MQTT.h>
+#include <Adafruit_MQTT_Client.h>
+#include <Adafruit_BME280.h>
+#include <Wire.h>
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SH110X.h>
+
+// ------- WiFi & Adafruit IO Credentials ------
+#define WIFI_SSID     "-"
+#define WIFI_PASS     "-"
+#define AIO_SERVER    "io.adafruit.com"
+#define AIO_SERVERPORT 1883
+#define AIO_USERNAME  "-"
+#define AIO_KEY       "-"
+
+// ------- MQTT Setup -------
+WiFiClient client;
+Adafruit_MQTT_Client mqtt(&client, AIO_SERVER, AIO_SERVERPORT, AIO_USERNAME, AIO_KEY);
+
+Adafruit_MQTT_Publish feed_temp     = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/air-quality-sensor.temperature");
+Adafruit_MQTT_Publish feed_humidity = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/air-quality-sensor.humidity");
+
+// ------- Sensors & Display -------
+Adafruit_BME280 bme;   // I2C
+Adafruit_SH1107 display(64, 128, &Wire);
+
+bool bmeFound = false;
+bool oledFound = true;
+
+unsigned long lastPublish = 0;
+const unsigned long publishInterval = 5000;   // <-- every 5 seconds for testing
+
+// ---------- Functions ----------
+void connectWiFi() {
+  Serial.print("Connecting to WiFi...");
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println(" ✅ WiFi connected");
+}
+
+void connectMQTT() {
+  Serial.print("Connecting to Adafruit IO MQTT...");
+  while (mqtt.connect() != 0) {
+    Serial.println("Retrying MQTT connection in 5 seconds...");
+    delay(5000);
+  }
+  Serial.println(" ✅ MQTT connected");
+}
+
+void updateOLED(float temp, float humid) {
+  if (!oledFound) return;
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.print("Temp:");
+  display.print(temp, 1);
+  display.println("F");
+
+  display.setTextSize(1);
+  display.setCursor(0, 30);
+  display.print("Hum:");
+  display.print(humid, 1);
+  display.println("%");
+
+  display.display();
+}
+
+// ---------- Setup ----------
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  // Use correct I²C pins for ESP32
+  Wire.begin(21, 22);
+  delay(500);
+
+  connectWiFi();
+  connectMQTT();
+
+  // --- Initialize BME280 ---
+  if (!bme.begin(0x76) && !bme.begin(0x77)) {
+    Serial.println("⚠️ Could not find a valid BME280 sensor!");
+  } else {
+    bmeFound = true;
+    Serial.println("✅ BME280 sensor initialized");
+  }
+
+  Serial.println("Testing OLED display...");
+
+delay(500);  // Allow power to stabilize
+
+if (!display.begin(0x3C, true)) {
+  Serial.println("⚠️ OLED not found at 0x3C");
+  while (1) delay(10);  // Stop if not found
+}
+
+Serial.println("✅ OLED initialized!");
+
+display.clearDisplay();
+display.setRotation(1);
+
+display.setTextSize(1);
+display.setTextColor(SH110X_WHITE);
+display.setCursor(0, 0);
+display.println("Hello, OLED!");
+display.println("Test Passed!");
+display.display();
+
+Serial.println("Text displayed on OLED.");
+
+}
+
+// ---------- Loop ----------
+void loop() {
+  mqtt.processPackets(10);
+  mqtt.ping();
+
+  unsigned long now = millis();
+  if (now - lastPublish >= publishInterval) {
+    lastPublish = now;
+
+    float temp = bmeFound ? (bme.readTemperature() * 1.8 + 32) : 0;
+    float humid = bmeFound ? bme.readHumidity() : 0;
+
+    Serial.printf("Temp: %.2f F | Humidity: %.2f %%\n", temp, humid);
+
+    // --- Publish to Adafruit IO ---
+    char buf[10];
+    dtostrf(temp, 4, 2, buf);
+    feed_temp.publish(buf);
+
+    dtostrf(humid, 4, 2, buf);
+    feed_humidity.publish(buf);
+
+    // --- Display on OLED ---
+    updateOLED(temp, humid);
+  }
+}
